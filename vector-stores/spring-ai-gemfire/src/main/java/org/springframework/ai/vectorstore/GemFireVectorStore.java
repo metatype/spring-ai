@@ -20,6 +20,10 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 
+import com.fasterxml.jackson.annotation.JsonCreator;
+import com.fasterxml.jackson.annotation.JsonInclude;
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.ai.document.Document;
 import org.springframework.ai.embedding.EmbeddingClient;
 import org.springframework.http.MediaType;
@@ -60,7 +64,8 @@ public class GemFireVectorStore implements VectorStore {
 		}
 
 		private GemFireVectorStoreConfig(Builder builder) {
-			String base = UriComponentsBuilder.fromUriString("http{ssl}://{host}:{port}/gemfire-vectordb/v1/{index}")
+			String base = UriComponentsBuilder
+				.fromUriString("http{ssl}://{host}:{port}/gemfire-vectordb/v1indexes/{index}")
 				.build(builder.sslEnabled ? "s" : "", builder.host, builder.port, builder.index)
 				.toString();
 
@@ -142,11 +147,13 @@ public class GemFireVectorStore implements VectorStore {
 
 	}
 
-	private static final int DEFAULT_PORT = 8080;
+	private static final int DEFAULT_PORT = 9090;
 
 	private static final int DEFAULT_TOP_K_PER_BUCKET = 50;
 
 	private static final String DEFAULT_DOCUMENT_FIELD = "document";
+
+	public static final String INDEX_NAME = "spring-ai-index";
 
 	public GemFireVectorStore(GemFireVectorStoreConfig config, EmbeddingClient embedding) {
 		Assert.notNull(config, "GemFireVectorStoreConfig must not be null");
@@ -161,8 +168,32 @@ public class GemFireVectorStore implements VectorStore {
 
 	private static final class CreateRequest {
 
-		@JsonProperty("embedding-type")
-		private final String embeddingType = "float";
+		private String name;
+
+		@JsonProperty("beam-width")
+		private int beamWidth = 100;
+
+		@JsonProperty("max-connections")
+		private int maxConnections = 16;
+
+		@JsonProperty("vector-similarity-function")
+		private String vectorSimilarityFunction = "COSINE";
+
+		private final String[] fields = new String[] { "vector" };
+
+		private final int buckets = 0;
+
+		public CreateRequest(String name) {
+			this.name = name;
+		}
+
+		public String getName() {
+			return name;
+		}
+
+		public void setName(String name) {
+			this.name = name;
+		}
 
 	}
 
@@ -174,10 +205,11 @@ public class GemFireVectorStore implements VectorStore {
 
 			private List<Double> vector;
 
+			@JsonInclude(JsonInclude.Include.NON_NULL)
 			private Map<String, Object> metadata;
 
-			public Embedding(String key, List<Double> vector, String contentName, String content,
-					Map<String, Object> metadata) {
+			public Embedding(@JsonProperty("key") String key, @JsonProperty("vector") List<Double> vector,
+					String contentName, String content, @JsonProperty("metadata") Map<String, Object> metadata) {
 				this.key = key;
 				this.vector = vector;
 				this.metadata = new HashMap<>(metadata);
@@ -204,7 +236,8 @@ public class GemFireVectorStore implements VectorStore {
 			return embeddings;
 		}
 
-		public UploadRequest(List<Embedding> embeddings) {
+		@JsonCreator
+		public UploadRequest(@JsonProperty("embeddings") List<Embedding> embeddings) {
 			this.embeddings = embeddings;
 		}
 
@@ -283,13 +316,21 @@ public class GemFireVectorStore implements VectorStore {
 					document.getContent(), document.getMetadata());
 		}).toList());
 
-		client.put()
-			.uri("/keys")
-			.contentType(MediaType.APPLICATION_JSON)
-			.bodyValue(upload)
-			.retrieve()
-			.bodyToMono(Void.class)
-			.block();
+		ObjectMapper objectMapper = new ObjectMapper();
+		try {
+			String embeddingsJson = objectMapper.writeValueAsString(upload).substring("{\"embeddings\":".length());
+
+			client.post()
+				.uri("/" + INDEX_NAME + "/embeddings")
+				.contentType(MediaType.APPLICATION_JSON)
+				.bodyValue(embeddingsJson)
+				.retrieve()
+				.bodyToMono(Void.class)
+				.block();
+		}
+		catch (JsonProcessingException e) {
+			throw new RuntimeException(e);
+		}
 	}
 
 	@Override
@@ -319,17 +360,20 @@ public class GemFireVectorStore implements VectorStore {
 			.block();
 	}
 
-	public void createIndex() {
+	public void createIndex() throws JsonProcessingException {
+		CreateRequest createRequest = new CreateRequest(INDEX_NAME);
+		ObjectMapper objectMapper = new ObjectMapper();
+		String index = objectMapper.writeValueAsString(createRequest);
 		client.post()
 			.contentType(MediaType.APPLICATION_JSON)
-			.bodyValue(new CreateRequest())
+			.bodyValue(index)
 			.retrieve()
 			.bodyToMono(Void.class)
 			.block();
 	}
 
 	public void deleteIndex() {
-		client.delete().uri("?delete-data=true").retrieve().bodyToMono(Void.class).block();
+		client.delete().uri("/" + INDEX_NAME + "/?delete-data=true").retrieve().bodyToMono(Void.class).block();
 	}
 
 }

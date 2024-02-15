@@ -164,7 +164,9 @@ public class GemFireVectorStoreIT {
 		public GemFireVectorStoreConfig gemfireVectorStoreConfig() {
 			// return
 			// GemFireVectorStoreConfig.builder().withHost(System.getenv("GEMFIRE_HOST")).build();
-			return GemFireVectorStoreConfig.builder().withHost("127.0.0.1").withIndex("spring-ai-index").build();
+			// return
+			// GemFireVectorStoreConfig.builder().withHost("127.0.0.1").withIndex("spring-ai-index").build();
+			return GemFireVectorStoreConfig.builder().withHost("localhost").build();
 		}
 
 		@Bean
