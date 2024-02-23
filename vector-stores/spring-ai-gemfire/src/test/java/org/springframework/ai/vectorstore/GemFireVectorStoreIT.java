@@ -17,6 +17,7 @@
 package org.springframework.ai.vectorstore;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.hamcrest.Matchers.hasSize;
 
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
@@ -25,6 +26,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 
+import org.awaitility.Awaitility;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -73,14 +75,29 @@ public class GemFireVectorStoreIT {
 	}
 
 	@Test
-	public void addAndSearchTest() {
+	public void addAndDeleteEmbeddingTest() {
 		contextRunner.run(context -> {
 			VectorStore vectorStore = context.getBean(VectorStore.class);
 			vectorStore.add(documents);
+			vectorStore.delete(documents.stream().map(doc -> doc.getId()).toList());
+			Awaitility.await().until(() -> {
+				return vectorStore.similaritySearch(SearchRequest.query("Great Depression").withTopK(3));
+			}, hasSize(0));
+		});
+	}
+
+	@Test
+	public void addAndSearchTest() {
+		contextRunner.run(context -> {
+			VectorStore vectorStore = context.getBean(VectorStore.class);
+
+			vectorStore.add(documents);
+
+			Awaitility.await().until(() -> {
+				return vectorStore.similaritySearch(SearchRequest.query("Great Depression").withTopK(1));
+			}, hasSize(1));
 
 			List<Document> results = vectorStore.similaritySearch(SearchRequest.query("Great Depression").withTopK(1));
-			assertThat(results).hasSize(1);
-
 			Document resultDoc = results.get(0);
 			assertThat(resultDoc.getId()).isEqualTo(documents.get(2).getId());
 			assertThat(resultDoc.getContent()).contains("The Great Depression (1929–1939) was an economic shock");
@@ -97,14 +114,12 @@ public class GemFireVectorStoreIT {
 
 			Document document = new Document(UUID.randomUUID().toString(), "Spring AI rocks!!",
 					Collections.singletonMap("meta1", "meta1"));
-
 			vectorStore.add(List.of(document));
-
 			SearchRequest springSearchRequest = SearchRequest.query("Spring").withTopK(5);
+			Awaitility.await().until(() -> {
+				return vectorStore.similaritySearch(SearchRequest.query("Great Depression").withTopK(1));
+			}, hasSize(1));
 			List<Document> results = vectorStore.similaritySearch(springSearchRequest);
-
-			assertThat(results).hasSize(1);
-
 			Document resultDoc = results.get(0);
 			assertThat(resultDoc.getId()).isEqualTo(document.getId());
 			assertThat(resultDoc.getContent()).isEqualTo("Spring AI rocks!!");
@@ -120,7 +135,6 @@ public class GemFireVectorStoreIT {
 			results = vectorStore.similaritySearch(fooBarSearchRequest);
 
 			assertThat(results).hasSize(1);
-
 			resultDoc = results.get(0);
 			assertThat(resultDoc.getId()).isEqualTo(document.getId());
 			assertThat(resultDoc.getContent()).isEqualTo("The World is Big and Salvation Lurks Around the Corner");
@@ -135,6 +149,11 @@ public class GemFireVectorStoreIT {
 		contextRunner.run(context -> {
 			VectorStore vectorStore = context.getBean(VectorStore.class);
 			vectorStore.add(documents);
+
+			Awaitility.await().until(() -> {
+				return vectorStore
+					.similaritySearch(SearchRequest.query("Great Depression").withTopK(5).withSimilarityThresholdAll());
+			}, hasSize(3));
 
 			List<Document> fullResult = vectorStore
 				.similaritySearch(SearchRequest.query("Depression").withTopK(5).withSimilarityThresholdAll());
@@ -162,10 +181,6 @@ public class GemFireVectorStoreIT {
 
 		@Bean
 		public GemFireVectorStoreConfig gemfireVectorStoreConfig() {
-			// return
-			// GemFireVectorStoreConfig.builder().withHost(System.getenv("GEMFIRE_HOST")).build();
-			// return
-			// GemFireVectorStoreConfig.builder().withHost("127.0.0.1").withIndex("spring-ai-index").build();
 			return GemFireVectorStoreConfig.builder().withHost("localhost").build();
 		}
 
