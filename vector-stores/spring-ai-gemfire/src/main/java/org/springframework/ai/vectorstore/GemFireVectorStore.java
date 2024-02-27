@@ -178,19 +178,6 @@ public class GemFireVectorStore implements VectorStore {
 
 		private String name;
 
-		@JsonProperty("beam-width")
-		private int beamWidth = 100;
-
-		@JsonProperty("max-connections")
-		private int maxConnections = 16;
-
-		@JsonProperty("vector-similarity-function")
-		private String vectorSimilarityFunction = "COSINE";
-
-		private final String[] fields = new String[] { "vector" };
-
-		private final int buckets = 0;
-
 		public CreateRequest(String name) {
 			this.name = name;
 		}
@@ -335,8 +322,15 @@ public class GemFireVectorStore implements VectorStore {
 				.bodyToMono(Void.class)
 				.block();
 		}
+		catch (WebClientResponseException.NotFound notFoundException) {
+			throw new RuntimeException("Vector index does not exist", notFoundException);
+		}
+		catch (WebClientResponseException.BadRequest badRequestException) {
+			throw new RuntimeException("Bad request. The request body could not be processed successfully.",
+					badRequestException);
+		}
 		catch (Exception e) {
-			throw new RuntimeException("Vector index does not exist");
+			throw new RuntimeException("An unexpected error occurred", e);
 		}
 	}
 
@@ -351,7 +345,7 @@ public class GemFireVectorStore implements VectorStore {
 				.block();
 		}
 		catch (Exception e) {
-			throw new RuntimeException("Error removing embedding with ID: " + e);
+			throw new RuntimeException("Error removing embedding " + e);
 		}
 		return Optional.of(true);
 	}
@@ -397,7 +391,10 @@ public class GemFireVectorStore implements VectorStore {
 				.block();
 		}
 		catch (WebClientResponseException exception) {
-			logger.warn("Index already exists", exception);
+			logger.warn("Index already exists");
+		}
+		catch (Exception e) {
+			throw new RuntimeException("Internal server error", e);
 		}
 	}
 
@@ -406,7 +403,10 @@ public class GemFireVectorStore implements VectorStore {
 			client.delete().uri("/" + INDEX_NAME + "/?delete-data=true").retrieve().bodyToMono(Void.class).block();
 		}
 		catch (WebClientResponseException.NotFound notFoundException) {
-			logger.warn("Vector index not found", notFoundException);
+			logger.warn("Vector index does not exist", notFoundException);
+		}
+		catch (Exception e) {
+			throw new RuntimeException("An unexpected error occurred", e);
 		}
 	}
 

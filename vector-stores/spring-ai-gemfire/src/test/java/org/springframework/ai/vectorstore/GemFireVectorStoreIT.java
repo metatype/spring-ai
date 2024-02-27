@@ -16,6 +16,7 @@
 
 package org.springframework.ai.vectorstore;
 
+import static java.util.concurrent.TimeUnit.MINUTES;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.hamcrest.Matchers.hasSize;
 
@@ -80,7 +81,7 @@ public class GemFireVectorStoreIT {
 			VectorStore vectorStore = context.getBean(VectorStore.class);
 			vectorStore.add(documents);
 			vectorStore.delete(documents.stream().map(doc -> doc.getId()).toList());
-			Awaitility.await().until(() -> {
+			Awaitility.await().atMost(1, MINUTES).until(() -> {
 				return vectorStore.similaritySearch(SearchRequest.query("Great Depression").withTopK(3));
 			}, hasSize(0));
 		});
@@ -93,7 +94,7 @@ public class GemFireVectorStoreIT {
 
 			vectorStore.add(documents);
 
-			Awaitility.await().until(() -> {
+			Awaitility.await().atMost(1, MINUTES).until(() -> {
 				return vectorStore.similaritySearch(SearchRequest.query("Great Depression").withTopK(1));
 			}, hasSize(1));
 
@@ -116,7 +117,7 @@ public class GemFireVectorStoreIT {
 					Collections.singletonMap("meta1", "meta1"));
 			vectorStore.add(List.of(document));
 			SearchRequest springSearchRequest = SearchRequest.query("Spring").withTopK(5);
-			Awaitility.await().until(() -> {
+			Awaitility.await().atMost(1, MINUTES).until(() -> {
 				return vectorStore.similaritySearch(SearchRequest.query("Great Depression").withTopK(1));
 			}, hasSize(1));
 			List<Document> results = vectorStore.similaritySearch(springSearchRequest);
@@ -150,7 +151,7 @@ public class GemFireVectorStoreIT {
 			VectorStore vectorStore = context.getBean(VectorStore.class);
 			vectorStore.add(documents);
 
-			Awaitility.await().until(() -> {
+			Awaitility.await().atMost(1, MINUTES).until(() -> {
 				return vectorStore
 					.similaritySearch(SearchRequest.query("Great Depression").withTopK(5).withSimilarityThresholdAll());
 			}, hasSize(3));
