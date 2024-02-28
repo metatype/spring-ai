@@ -15,19 +15,37 @@
  */
 package org.springframework.ai.vectorstore;
 
+import static org.springframework.http.HttpStatus.BAD_REQUEST;
+import static org.springframework.http.HttpStatus.CONFLICT;
+import static org.springframework.http.HttpStatus.NOT_FOUND;
+
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 
+import com.fasterxml.jackson.annotation.JsonCreator;
+import com.fasterxml.jackson.annotation.JsonInclude;
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.ai.document.Document;
 import org.springframework.ai.embedding.EmbeddingClient;
+import org.springframework.http.HttpMethod;
+import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
+import org.springframework.http.client.reactive.ClientHttpRequest;
 import org.springframework.util.Assert;
+import org.springframework.web.reactive.function.BodyInserter;
+import org.springframework.web.reactive.function.BodyInserters;
 import org.springframework.web.reactive.function.client.WebClient;
+import org.springframework.web.reactive.function.client.WebClientException;
+import org.springframework.web.reactive.function.client.WebClientResponseException;
 import org.springframework.web.util.UriComponentsBuilder;
 
 import com.fasterxml.jackson.annotation.JsonProperty;
+import reactor.util.annotation.NonNull;
 
 /**
  * A VectorStore implementation backed by GemFire. This store supports creating, updating,
@@ -36,6 +54,8 @@ import com.fasterxml.jackson.annotation.JsonProperty;
  * @author Anthony Baker
  */
 public class GemFireVectorStore implements VectorStore {
+
+	private static final Logger logger = LoggerFactory.getLogger(GemFireVectorStore.class);
 
 	private static final String DISTANCE_METADATA_FIELD_NAME = "distance";
 
@@ -60,7 +80,8 @@ public class GemFireVectorStore implements VectorStore {
 		}
 
 		private GemFireVectorStoreConfig(Builder builder) {
-			String base = UriComponentsBuilder.fromUriString("http{ssl}://{host}:{port}/gemfire-vectordb/v1/{index}")
+			String base = UriComponentsBuilder
+				.fromUriString("http{ssl}://{host}:{port}/gemfire-vectordb/v1/indexes/{index}")
 				.build(builder.sslEnabled ? "s" : "", builder.host, builder.port, builder.index)
 				.toString();
 
@@ -142,11 +163,13 @@ public class GemFireVectorStore implements VectorStore {
 
 	}
 
-	private static final int DEFAULT_PORT = 8080;
+	private static final int DEFAULT_PORT = 9090;
 
 	private static final int DEFAULT_TOP_K_PER_BUCKET = 50;
 
 	private static final String DEFAULT_DOCUMENT_FIELD = "document";
+
+	public static final String INDEX_NAME = "spring-ai-index";
 
 	public GemFireVectorStore(GemFireVectorStoreConfig config, EmbeddingClient embedding) {
 		Assert.notNull(config, "GemFireVectorStoreConfig must not be null");
@@ -161,23 +184,86 @@ public class GemFireVectorStore implements VectorStore {
 
 	private static final class CreateRequest {
 
-		@JsonProperty("embedding-type")
-		private final String embeddingType = "float";
+		private String name;
+
+		@JsonProperty("beam-width")
+		private int beamWidth = 100;
+
+		@JsonProperty("max-connections")
+		private int maxConnections = 16;
+
+		@JsonProperty("vector-similarity-function")
+		private String vectorSimilarityFunction = "COSINE";
+
+		private final String[] fields = new String[] { "vector" };
+
+		private final int buckets = 0;
+
+		public CreateRequest() {
+		}
+
+		public CreateRequest(String name) {
+			this.name = name;
+		}
+
+		public String getName() {
+			return name;
+		}
+
+		public void setName(String name) {
+			this.name = name;
+		}
+
+		public int getBeamWidth() {
+			return beamWidth;
+		}
+
+		public void setBeamWidth(int beamWidth) {
+			this.beamWidth = beamWidth;
+		}
+
+		public int getMaxConnections() {
+			return maxConnections;
+		}
+
+		public void setMaxConnections(int maxConnections) {
+			this.maxConnections = maxConnections;
+		}
+
+		public String getVectorSimilarityFunction() {
+			return vectorSimilarityFunction;
+		}
+
+		public void setVectorSimilarityFunction(String vectorSimilarityFunction) {
+			this.vectorSimilarityFunction = vectorSimilarityFunction;
+		}
 
 	}
 
 	private static final class UploadRequest {
 
+		private final List<Embedding> embeddings;
+
+		public List<Embedding> getEmbeddings() {
+			return embeddings;
+		}
+
+		@JsonCreator
+		public UploadRequest(@JsonProperty("embeddings") List<Embedding> embeddings) {
+			this.embeddings = embeddings;
+		}
+
 		private static final class Embedding {
 
 			private final String key;
 
-			private List<Double> vector;
+			private List<Float> vector;
 
+			@JsonInclude(JsonInclude.Include.NON_NULL)
 			private Map<String, Object> metadata;
 
-			public Embedding(String key, List<Double> vector, String contentName, String content,
-					Map<String, Object> metadata) {
+			public Embedding(@JsonProperty("key") String key, @JsonProperty("vector") List<Float> vector,
+					String contentName, String content, @JsonProperty("metadata") Map<String, Object> metadata) {
 				this.key = key;
 				this.vector = vector;
 				this.metadata = new HashMap<>(metadata);
@@ -188,7 +274,7 @@ public class GemFireVectorStore implements VectorStore {
 				return key;
 			}
 
-			public List<Double> getVector() {
+			public List<Float> getVector() {
 				return vector;
 			}
 
@@ -198,37 +284,31 @@ public class GemFireVectorStore implements VectorStore {
 
 		}
 
-		private final List<Embedding> embeddings;
-
-		public List<Embedding> getEmbeddings() {
-			return embeddings;
-		}
-
-		public UploadRequest(List<Embedding> embeddings) {
-			this.embeddings = embeddings;
-		}
-
 	}
 
 	private static final class QueryRequest {
 
-		private final List<Double> vector;
+		@JsonProperty("vector")
+		@NonNull
+		private final List<Float> vector;
 
+		@JsonProperty("top-k")
 		private final int k;
 
+		@JsonProperty("k-per-bucket")
 		private final int kPerBucket;
 
+		@JsonProperty("include-metadata")
 		private final boolean includeMetadata;
 
-		public QueryRequest(List<Double> vector, int k, int kPerBucket, boolean includeMetadata) {
+		public QueryRequest(List<Float> vector, int k, int kPerBucket, boolean includeMetadata) {
 			this.vector = vector;
 			this.k = k;
 			this.kPerBucket = kPerBucket;
 			this.includeMetadata = includeMetadata;
 		}
 
-		@JsonProperty("embedding")
-		public List<Double> getVector() {
+		public List<Float> getVector() {
 			return vector;
 		}
 
@@ -236,12 +316,10 @@ public class GemFireVectorStore implements VectorStore {
 			return k;
 		}
 
-		@JsonProperty("k-per-bucket")
 		public int getkPerBucket() {
 			return kPerBucket;
 		}
 
-		@JsonProperty("include-metadata")
 		public boolean isIncludeMetadata() {
 			return includeMetadata;
 		}
@@ -279,57 +357,151 @@ public class GemFireVectorStore implements VectorStore {
 		UploadRequest upload = new UploadRequest(documents.stream().map(document -> {
 			// Compute and assign an embedding to the document.
 			document.setEmbedding(this.embeddingClient.embed(document));
-			return new UploadRequest.Embedding(document.getId(), document.getEmbedding(), documentField,
-					document.getContent(), document.getMetadata());
+			List<Float> floatVector = document.getEmbedding().stream().map(Double::floatValue).toList();
+			return new UploadRequest.Embedding(document.getId(), floatVector, documentField, document.getContent(),
+					document.getMetadata());
 		}).toList());
 
-		client.put()
-			.uri("/keys")
+		ObjectMapper objectMapper = new ObjectMapper();
+		String embeddingsJson = null;
+		try {
+			embeddingsJson = objectMapper.writeValueAsString(upload).substring("{\"embeddings\":".length());
+		}
+		catch (JsonProcessingException e) {
+			throw new RuntimeException("Embedding json parsing error :" + e.getMessage());
+		}
+
+		client.post()
+			.uri("/" + INDEX_NAME + "/embeddings")
 			.contentType(MediaType.APPLICATION_JSON)
-			.bodyValue(upload)
+			.bodyValue(embeddingsJson)
 			.retrieve()
 			.bodyToMono(Void.class)
+			.onErrorMap(WebClientException.class, this::handleHttpClientException)
 			.block();
+	}
+
+	private Throwable handleHttpClientException(Throwable ex) {
+		if (!(ex instanceof WebClientResponseException)) {
+			logger.warn("Got an unexpected error: {}", ex.toString());
+			return ex;
+		}
+
+		WebClientResponseException clientException = (WebClientResponseException) ex;
+
+		if (clientException.getStatusCode().equals(NOT_FOUND)) {
+			throw new RuntimeException("Index " + INDEX_NAME + " not found :" + ex);
+		}
+		else if (clientException.getStatusCode().equals(BAD_REQUEST)) {
+			throw new RuntimeException("Bad Request :" + ex);
+		}
+		else {
+			logger.warn("Got an unexpected HTTP error: {}, ", clientException.getStatusCode());
+			return ex;
+		}
 	}
 
 	@Override
 	public Optional<Boolean> delete(List<String> idList) {
-		throw new UnsupportedOperationException("This vector store doesn't support delete (yet)");
+		try {
+			client.method(HttpMethod.DELETE)
+				.uri("/" + INDEX_NAME + "/embeddings/")
+				.body(BodyInserters.fromValue(idList))
+				.retrieve()
+				.bodyToMono(Void.class)
+				.block();
+		}
+		catch (Exception e) {
+			logger.warn("Error removing embedding: " + e);
+			return Optional.of(false);
+		}
+		return Optional.of(true);
 	}
 
 	@Override
 	public List<Document> similaritySearch(SearchRequest request) {
-		List<Double> vector = this.embeddingClient.embed(request.getQuery());
+		try {
+			List<Double> vector = this.embeddingClient.embed(request.getQuery());
+			List<Float> floatVector = vector.stream().map(Double::floatValue).toList();
 
-		return client.post()
-			.uri("/query")
-			.contentType(MediaType.APPLICATION_JSON)
-			.bodyValue(new QueryRequest(vector, request.getTopK(), topKPerBucket, true))
-			.retrieve()
-			.bodyToFlux(QueryResponse.class)
-			.filter(r -> r.score >= request.getSimilarityThreshold())
-			.map(r -> {
-				Map<String, Object> metadata = r.metadata;
-				metadata.put(DISTANCE_METADATA_FIELD_NAME, 1 - r.score);
-				String content = (String) metadata.remove(documentField);
+			return client.post()
+				.uri("/" + INDEX_NAME + "/query")
+				.contentType(MediaType.APPLICATION_JSON)
+				.bodyValue(new QueryRequest(floatVector, request.getTopK(), topKPerBucket, true))
+				.retrieve()
+				.bodyToFlux(QueryResponse.class)
+				.filter(r -> r.score >= request.getSimilarityThreshold())
+				.map(r -> {
+					Map<String, Object> metadata = r.metadata;
+					metadata.put(DISTANCE_METADATA_FIELD_NAME, 1 - r.score);
+					String content = (String) metadata.remove(documentField);
 
-				return new Document(r.key, content, metadata);
-			})
-			.collectList()
-			.block();
+					return new Document(r.key, content, metadata);
+				})
+				.collectList()
+				.block();
+		}
+		catch (Exception e) {
+			throw new RuntimeException("Error in similarity search", e);
+		}
 	}
 
 	public void createIndex() {
-		client.post()
-			.contentType(MediaType.APPLICATION_JSON)
-			.bodyValue(new CreateRequest())
-			.retrieve()
-			.bodyToMono(Void.class)
-			.block();
+		try {
+			CreateRequest createRequest = new CreateRequest();
+			createRequest.setName(INDEX_NAME);
+			createRequest.setBeamWidth(20);
+			createRequest.setMaxConnections(16);
+			ObjectMapper objectMapper = new ObjectMapper();
+			String index = objectMapper.writeValueAsString(createRequest);
+			client.post()
+				.contentType(MediaType.APPLICATION_JSON)
+				.bodyValue(index)
+				.retrieve()
+				.bodyToMono(Void.class)
+				.block();
+		}
+		catch (Exception e) {
+			logger.warn("An unexpected error occurred while creating the index");
+		}
 	}
 
 	public void deleteIndex() {
-		client.delete().uri("?delete-data=true").retrieve().bodyToMono(Void.class).block();
+		try {
+			DeleteRequest deleteRequest = new DeleteRequest();
+			deleteRequest.setDeleteData(true);
+			client.method(HttpMethod.DELETE)
+				.uri("/" + INDEX_NAME)
+				.body(BodyInserters.fromValue(deleteRequest))
+				.retrieve()
+				.bodyToMono(Void.class)
+				.block();
+		}
+		catch (Exception e) {
+			logger.warn("An unexpected error occurred while deleting the index", e);
+		}
+	}
+
+	private class DeleteRequest {
+
+		@JsonProperty("delete-data")
+		private boolean deleteData = true;
+
+		public DeleteRequest() {
+		}
+
+		public DeleteRequest(boolean deleteData) {
+			this.deleteData = deleteData;
+		}
+
+		public boolean isDeleteData() {
+			return deleteData;
+		}
+
+		public void setDeleteData(boolean deleteData) {
+			this.deleteData = deleteData;
+		}
+
 	}
 
 }
