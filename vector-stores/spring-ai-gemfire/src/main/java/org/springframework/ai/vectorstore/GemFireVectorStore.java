@@ -15,6 +15,10 @@
  */
 package org.springframework.ai.vectorstore;
 
+import static org.springframework.http.HttpStatus.BAD_REQUEST;
+import static org.springframework.http.HttpStatus.CONFLICT;
+import static org.springframework.http.HttpStatus.NOT_FOUND;
+
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -29,10 +33,14 @@ import org.slf4j.LoggerFactory;
 import org.springframework.ai.document.Document;
 import org.springframework.ai.embedding.EmbeddingClient;
 import org.springframework.http.HttpMethod;
+import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
+import org.springframework.http.client.reactive.ClientHttpRequest;
 import org.springframework.util.Assert;
+import org.springframework.web.reactive.function.BodyInserter;
 import org.springframework.web.reactive.function.BodyInserters;
 import org.springframework.web.reactive.function.client.WebClient;
+import org.springframework.web.reactive.function.client.WebClientException;
 import org.springframework.web.reactive.function.client.WebClientResponseException;
 import org.springframework.web.util.UriComponentsBuilder;
 
@@ -155,7 +163,7 @@ public class GemFireVectorStore implements VectorStore {
 
 	}
 
-	private static final int DEFAULT_PORT = 8080;
+	private static final int DEFAULT_PORT = 9090;
 
 	private static final int DEFAULT_TOP_K_PER_BUCKET = 50;
 
@@ -178,12 +186,56 @@ public class GemFireVectorStore implements VectorStore {
 
 		private String name;
 
+		@JsonProperty("beam-width")
+		private int beamWidth = 100;
+
+		@JsonProperty("max-connections")
+		private int maxConnections = 16;
+
+		@JsonProperty("vector-similarity-function")
+		private String vectorSimilarityFunction = "COSINE";
+
+		private final String[] fields = new String[] { "vector" };
+
+		private final int buckets = 0;
+
+		public CreateRequest() {
+		}
+
 		public CreateRequest(String name) {
 			this.name = name;
 		}
 
 		public String getName() {
 			return name;
+		}
+
+		public void setName(String name) {
+			this.name = name;
+		}
+
+		public int getBeamWidth() {
+			return beamWidth;
+		}
+
+		public void setBeamWidth(int beamWidth) {
+			this.beamWidth = beamWidth;
+		}
+
+		public int getMaxConnections() {
+			return maxConnections;
+		}
+
+		public void setMaxConnections(int maxConnections) {
+			this.maxConnections = maxConnections;
+		}
+
+		public String getVectorSimilarityFunction() {
+			return vectorSimilarityFunction;
+		}
+
+		public void setVectorSimilarityFunction(String vectorSimilarityFunction) {
+			this.vectorSimilarityFunction = vectorSimilarityFunction;
 		}
 
 	}
@@ -311,26 +363,41 @@ public class GemFireVectorStore implements VectorStore {
 		}).toList());
 
 		ObjectMapper objectMapper = new ObjectMapper();
+		String embeddingsJson = null;
 		try {
-			String embeddingsJson = objectMapper.writeValueAsString(upload).substring("{\"embeddings\":".length());
+			embeddingsJson = objectMapper.writeValueAsString(upload).substring("{\"embeddings\":".length());
+		}
+		catch (JsonProcessingException e) {
+			throw new RuntimeException("Embedding json parsing error :" + e.getMessage());
+		}
 
-			client.post()
-				.uri("/" + INDEX_NAME + "/embeddings")
-				.contentType(MediaType.APPLICATION_JSON)
-				.bodyValue(embeddingsJson)
-				.retrieve()
-				.bodyToMono(Void.class)
-				.block();
+		client.post()
+			.uri("/" + INDEX_NAME + "/embeddings")
+			.contentType(MediaType.APPLICATION_JSON)
+			.bodyValue(embeddingsJson)
+			.retrieve()
+			.bodyToMono(Void.class)
+			.onErrorMap(WebClientException.class, this::handleHttpClientException)
+			.block();
+	}
+
+	private Throwable handleHttpClientException(Throwable ex) {
+		if (!(ex instanceof WebClientResponseException)) {
+			logger.warn("Got an unexpected error: {}", ex.toString());
+			return ex;
 		}
-		catch (WebClientResponseException.NotFound notFoundException) {
-			throw new RuntimeException("Vector index does not exist", notFoundException);
+
+		WebClientResponseException clientException = (WebClientResponseException) ex;
+
+		if (clientException.getStatusCode().equals(NOT_FOUND)) {
+			throw new RuntimeException("Index " + INDEX_NAME + " not found :" + ex);
 		}
-		catch (WebClientResponseException.BadRequest badRequestException) {
-			throw new RuntimeException("Bad request. The request body could not be processed successfully.",
-					badRequestException);
+		else if (clientException.getStatusCode().equals(BAD_REQUEST)) {
+			throw new RuntimeException("Bad Request :" + ex);
 		}
-		catch (Exception e) {
-			throw new RuntimeException("An unexpected error occurred", e);
+		else {
+			logger.warn("Got an unexpected HTTP error: {}, ", clientException.getStatusCode());
+			return ex;
 		}
 	}
 
@@ -345,7 +412,8 @@ public class GemFireVectorStore implements VectorStore {
 				.block();
 		}
 		catch (Exception e) {
-			throw new RuntimeException("Error removing embedding " + e);
+			logger.warn("Error removing embedding: " + e);
+			return Optional.of(false);
 		}
 		return Optional.of(true);
 	}
@@ -378,9 +446,12 @@ public class GemFireVectorStore implements VectorStore {
 		}
 	}
 
-	public void createIndex() throws JsonProcessingException {
+	public void createIndex() {
 		try {
-			CreateRequest createRequest = new CreateRequest(INDEX_NAME);
+			CreateRequest createRequest = new CreateRequest();
+			createRequest.setName(INDEX_NAME);
+			createRequest.setBeamWidth(20);
+			createRequest.setMaxConnections(16);
 			ObjectMapper objectMapper = new ObjectMapper();
 			String index = objectMapper.writeValueAsString(createRequest);
 			client.post()
@@ -390,24 +461,47 @@ public class GemFireVectorStore implements VectorStore {
 				.bodyToMono(Void.class)
 				.block();
 		}
-		catch (WebClientResponseException exception) {
-			logger.warn("Index already exists");
-		}
 		catch (Exception e) {
-			throw new RuntimeException("Internal server error", e);
+			logger.warn("An unexpected error occurred while creating the index");
 		}
 	}
 
 	public void deleteIndex() {
 		try {
-			client.delete().uri("/" + INDEX_NAME + "/?delete-data=true").retrieve().bodyToMono(Void.class).block();
-		}
-		catch (WebClientResponseException.NotFound notFoundException) {
-			logger.warn("Vector index does not exist", notFoundException);
+			DeleteRequest deleteRequest = new DeleteRequest();
+			deleteRequest.setDeleteData(true);
+			client.method(HttpMethod.DELETE)
+				.uri("/" + INDEX_NAME)
+				.body(BodyInserters.fromValue(deleteRequest))
+				.retrieve()
+				.bodyToMono(Void.class)
+				.block();
 		}
 		catch (Exception e) {
-			throw new RuntimeException("An unexpected error occurred", e);
+			logger.warn("An unexpected error occurred while deleting the index", e);
 		}
+	}
+
+	private class DeleteRequest {
+
+		@JsonProperty("delete-data")
+		private boolean deleteData = true;
+
+		public DeleteRequest() {
+		}
+
+		public DeleteRequest(boolean deleteData) {
+			this.deleteData = deleteData;
+		}
+
+		public boolean isDeleteData() {
+			return deleteData;
+		}
+
+		public void setDeleteData(boolean deleteData) {
+			this.deleteData = deleteData;
+		}
+
 	}
 
 }
